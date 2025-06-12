@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  mdforge:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - DEBUG=1
+      - MAX_FILE_SIZE_MB=100
+      - ENABLE_AI_PROCESSING=false
+    volumes:
+      - ./app:/app/app
+    restart: unless-stopped
