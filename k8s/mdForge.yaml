@@ -1,0 +1,335 @@
+---
+# mdForge Kubernetes Deployment - All-in-One
+# This file contains all Kubernetes resources for deploying mdForge
+apiVersion: v1
+kind: namespace
+metadata:
+  name: mdforge-ns
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mdforge-config
+  namespace: mdforge-ns
+  labels:
+    app: mdforge
+data:
+  APP_NAME: "mdForge"
+  VERSION: "1.0.0"
+  DEBUG: "false"
+  MAX_FILE_SIZE_MB: "100"
+  API_V1_STR: "/api/v1"
+  ENABLE_AI_PROCESSING: "true"
+  OPENAI_BASE_URL: "http://ollama-service:11434"  # Your local ollama
+  DEFAULT_AI_MODEL: "gpt-3.5-turbo"
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mdforge-secrets
+  namespace: mdforge-ns
+  labels:
+    app: mdforge
+type: Opaque
+stringData:
+  openai-api-key: "your-openai-api-key-here"
+  anthropic-api-key: "your-anthropic-api-key-here"
+  google-api-key: "your-google-api-key-here"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mdforge
+  namespace: mdforge-ns
+  labels:
+    app: mdforge
+    version: v1
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: mdforge
+  template:
+    metadata:
+      labels:
+        app: mdforge
+        version: v1
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+      - name: mdforge
+        image: onegaionegai/mdforge:latest
+        imagePullPolicy: Always
+        ports:
+        - name: http
+          containerPort: 8000
+          protocol: TCP
+        envFrom:
+        - configMapRef:
+            name: mdforge-config
+        env:
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: mdforge-secrets
+              key: openai-api-key
+              optional: true
+        - name: ANTHROPIC_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: mdforge-secrets
+              key: anthropic-api-key
+              optional: true
+        - name: GOOGLE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: mdforge-secrets
+              key: google-api-key
+              optional: true
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+            ephemeral-storage: "2Gi"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+            ephemeral-storage: "4Gi"
+        readinessProbe:
+          httpGet:
+            path: /api/v1/health
+            port: 8000
+            scheme: HTTP
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /api/v1/health
+            port: 8000
+            scheme: HTTP
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 10
+          successThreshold: 1
+          failureThreshold: 3
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: tmp-volume
+          mountPath: /tmp
+        - name: app-cache
+          mountPath: /app/.cache
+      volumes:
+      - name: tmp-volume
+        emptyDir:
+          sizeLimit: 2Gi
+      - name: app-cache
+        emptyDir:
+          sizeLimit: 1Gi
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: "OnRootMismatch"
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mdforge-service
+  namespace: mdforge-ns
+  labels:
+    app: mdforge
+spec:
+  type: ClusterIP
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8000
+    protocol: TCP
+  selector:
+    app: mdforge
+  sessionAffinity: None
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mdforge-ingress
+  namespace: mdforge-ns
+  labels:
+    app: mdforge
+  annotations:
+    # Nginx specific annotations
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
+    nginx.ingress.kubernetes.io/client-max-body-size: "100m"
+    
+    # Security headers
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      add_header X-Content-Type-Options nosniff;
+      add_header X-Frame-Options DENY;
+      add_header X-XSS-Protection "1; mode=block";
+      add_header Referrer-Policy "strict-origin-when-cross-origin";
+    
+    # Rate limiting (optional)
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    nginx.ingress.kubernetes.io/rate-limit-rps: "10"
+    
+    # CORS (optional)
+    nginx.ingress.kubernetes.io/enable-cors: "true"
+    nginx.ingress.kubernetes.io/cors-allow-origin: "*"
+    nginx.ingress.kubernetes.io/cors-allow-methods: "GET, POST, OPTIONS"
+    nginx.ingress.kubernetes.io/cors-allow-headers: "DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization"
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: mdforge.yourdomain.com  # Replace with your actual domain
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: mdforge-service
+            port:
+              number: 80
+  # Uncomment and configure for TLS/HTTPS
+  # tls:
+  # - hosts:
+  #   - mdforge.yourdomain.com
+  #   secretName: mdforge-tls
+
+---
+# Optional: Horizontal Pod Autoscaler
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: mdforge-hpa
+  namespace: mdforge-ns
+  labels:
+    app: mdforge
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: mdforge
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+      - type: Percent
+        value: 50
+        periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 10
+        periodSeconds: 60
+
+---
+# Optional: Pod Disruption Budget
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: mdforge-pdb
+  namespace: mdforge-ns
+  labels:
+    app: mdforge
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: mdforge
+
+---
+# Optional: Network Policy (if using network policies)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mdforge-netpol
+  namespace: mdforge-ns
+  labels:
+    app: mdforge
+spec:
+  podSelector:
+    matchLabels:
+      app: mdforge
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: 8000
+  - from:
+    - podSelector:
+        matchLabels:
+          app: prometheus
+    ports:
+    - protocol: TCP
+      port: 8000
+  egress:
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 53
+    - protocol: UDP
+      port: 53
+  - to:
+    - podSelector:
+        matchLabels:
+          app: ollama
+    ports:
+    - protocol: TCP
+      port: 11434
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 443
+    - protocol: TCP
+      port: 80
